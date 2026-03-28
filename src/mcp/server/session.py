@@ -40,7 +40,7 @@ from mcp import types
 from mcp.server.experimental.session_features import ExperimentalServerSessionFeatures
 from mcp.server.models import InitializationOptions
 from mcp.server.validation import validate_sampling_tools, validate_tool_use_result_messages
-from mcp.shared.dispatcher import JSONRPCDispatcher
+from mcp.shared.dispatcher import Dispatcher, JSONRPCDispatcher
 from mcp.shared.exceptions import StatelessModeNotSupported
 from mcp.shared.experimental.tasks.capabilities import check_tasks_capability
 from mcp.shared.experimental.tasks.helpers import RELATED_TASK_METADATA_KEY
@@ -84,8 +84,9 @@ class ServerSession(
         write_stream: MemoryObjectSendStream[SessionMessage],
         init_options: InitializationOptions,
         stateless: bool = False,
+        dispatcher: Dispatcher | None = None,
     ) -> None:
-        super().__init__(read_stream, write_stream)
+        super().__init__(read_stream, write_stream, dispatcher=dispatcher)
         self._stateless = stateless
         self._initialization_state = (
             InitializationState.Initialized if stateless else InitializationState.NotInitialized
