@@ -40,8 +40,11 @@ from mcp.types import (
     RequestId,
 )
 
-OnRequestFn = Callable[[RequestId, dict[str, Any], MessageMetadata], Awaitable[None]]
-"""Called when the peer sends us a request. Receives ``(request_id, {"method", "params"}, metadata)``."""
+ResponderFn = Callable[[dict[str, Any] | ErrorData], Awaitable[None]]
+"""Callback to send a response to an incoming request. Receives either a raw result dict or an ErrorData object."""
+
+OnRequestFn = Callable[[RequestId, dict[str, Any], MessageMetadata, ResponderFn], Awaitable[None]]
+"""Called when the peer sends us a request. Receives ``(request_id, {"method", "params"}, metadata, responder)``."""
 
 OnNotificationFn = Callable[[dict[str, Any]], Awaitable[None]]
 """Called when the peer sends us a notification. Receives ``{"method", "params"}``."""
@@ -104,14 +107,6 @@ class Dispatcher(Protocol):
         related_request_id: RequestId | None = None,
     ) -> None:
         """Send a fire-and-forget notification. ``notification`` is ``{"method", "params"}``."""
-        ...
-
-    async def send_response(
-        self,
-        request_id: RequestId,
-        response: dict[str, Any] | ErrorData,
-    ) -> None:
-        """Send a response to a request we previously received via ``on_request``."""
         ...
 
 
@@ -202,10 +197,16 @@ class JSONRPCDispatcher:
                     if isinstance(message, Exception):
                         await self._on_error(message)
                     elif isinstance(message.message, JSONRPCRequest):
+                        req_id = message.message.id
+
+                        async def responder(response: dict[str, Any] | ErrorData) -> None:
+                            await self.send_response(req_id, response)
+
                         await self._on_request(
-                            message.message.id,
+                            req_id,
                             message.message.model_dump(by_alias=True, mode="json", exclude_none=True),
                             message.metadata,
+                            responder,
                         )
                     elif isinstance(message.message, JSONRPCNotification):
                         await self._on_notification(

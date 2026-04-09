@@ -15,6 +15,7 @@ from mcp.shared.dispatcher import (
     OnErrorFn,
     OnNotificationFn,
     OnRequestFn,
+    ResponderFn,
 )
 from mcp.shared.message import MessageMetadata
 from mcp.types import (
@@ -45,7 +46,16 @@ class SpyDispatcher:
         self.sent_responses: list[dict[str, Any] | ErrorData] = []
 
     def set_handlers(self, on_request: OnRequestFn, on_notification: OnNotificationFn, on_error: OnErrorFn) -> None:
-        self._inner.set_handlers(on_request, on_notification, on_error)
+        async def wrapped_on_request(
+            request_id: RequestId, payload: dict[str, Any], metadata: MessageMetadata, responder: ResponderFn
+        ) -> None:
+            async def spy_responder(response: dict[str, Any] | ErrorData) -> None:
+                self.sent_responses.append(response)
+                await responder(response)
+
+            await on_request(request_id, payload, metadata, spy_responder)
+
+        self._inner.set_handlers(wrapped_on_request, on_notification, on_error)
 
     async def run(self) -> None:
         await self._inner.run()
@@ -65,10 +75,6 @@ class SpyDispatcher:
     ) -> None:
         self.sent_notifications.append(notification)
         await self._inner.send_notification(notification, related_request_id)
-
-    async def send_response(self, request_id: RequestId, response: dict[str, Any] | ErrorData) -> None:
-        self.sent_responses.append(response)
-        await self._inner.send_response(request_id, response)
 
 
 async def test_client_session_accepts_custom_dispatcher():

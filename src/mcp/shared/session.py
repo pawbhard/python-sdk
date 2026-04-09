@@ -74,6 +74,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
         request: ReceiveRequestT,
         session: BaseSession[SendRequestT, SendNotificationT, SendResultT, ReceiveRequestT, ReceiveNotificationT],
         on_complete: Callable[[RequestResponder[ReceiveRequestT, SendResultT]], Any],
+        responder: Callable[[dict[str, Any] | ErrorData], Awaitable[None]],
         message_metadata: MessageMetadata = None,
     ) -> None:
         self.request_id = request_id
@@ -81,6 +82,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
         self.request = request
         self.message_metadata = message_metadata
         self._session = session
+        self._responder = responder
         self._completed = False
         self._cancel_scope = anyio.CancelScope()
         self._on_complete = on_complete
@@ -125,9 +127,10 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
         if not self.cancelled:  # pragma: no branch
             self._completed = True
 
-            await self._session._send_response(  # type: ignore[reportPrivateUsage]
-                request_id=self.request_id, response=response
-            )
+            if isinstance(response, ErrorData):
+                await self._responder(response)
+            else:
+                await self._responder(response.model_dump(by_alias=True, mode="json", exclude_none=True))
 
     async def cancel(self) -> None:
         """Cancel this request and mark it as completed."""
@@ -139,10 +142,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
         self._cancel_scope.cancel()
         self._completed = True  # Mark as completed so it's removed from in_flight
         # Send an error response to indicate cancellation
-        await self._session._send_response(  # type: ignore[reportPrivateUsage]
-            request_id=self.request_id,
-            response=ErrorData(code=0, message="Request cancelled"),
-        )
+        await self._responder(ErrorData(code=0, message="Request cancelled"))
 
     @property
     def in_flight(self) -> bool:  # pragma: no cover
@@ -302,15 +302,6 @@ class BaseSession(
             related_request_id,
         )
 
-    async def _send_response(self, request_id: RequestId, response: SendResultT | ErrorData) -> None:
-        if isinstance(response, ErrorData):
-            await self._dispatcher.send_response(request_id, response)
-        else:
-            await self._dispatcher.send_response(
-                request_id,
-                response.model_dump(by_alias=True, mode="json", exclude_none=True),
-            )
-
     @property
     def _receive_request_adapter(self) -> TypeAdapter[ReceiveRequestT]:
         """Each subclass must provide its own request adapter."""
@@ -321,31 +312,33 @@ class BaseSession(
         raise NotImplementedError
 
     async def _on_incoming_request(
-        self, request_id: RequestId, payload: dict[str, Any], metadata: MessageMetadata
+        self,
+        request_id: RequestId,
+        payload: dict[str, Any],
+        metadata: MessageMetadata,
+        responder: Callable[[dict[str, Any] | ErrorData], Awaitable[None]],
     ) -> None:
         """Dispatcher callback: a request arrived from the peer."""
         try:
             validated_request = self._receive_request_adapter.validate_python(payload, by_name=False)
-            responder = RequestResponder(
+            resp = RequestResponder(
                 request_id=request_id,
                 request_meta=validated_request.params.meta if validated_request.params else None,
                 request=validated_request,
                 session=self,
                 on_complete=lambda r: self._in_flight.pop(r.request_id, None),
+                responder=responder,
                 message_metadata=metadata,
             )
-            self._in_flight[responder.request_id] = responder
-            await self._received_request(responder)
+            self._in_flight[resp.request_id] = resp
+            await self._received_request(resp)
 
-            if not responder._completed:  # type: ignore[reportPrivateUsage]
-                await self._handle_incoming(responder)
+            if not resp._completed:  # type: ignore[reportPrivateUsage]
+                await self._handle_incoming(resp)
         except Exception:
             logging.warning("Failed to validate request", exc_info=True)
             logging.debug(f"Message that failed validation: {payload}")
-            await self._dispatcher.send_response(
-                request_id,
-                ErrorData(code=INVALID_PARAMS, message="Invalid request parameters", data=""),
-            )
+            await responder(ErrorData(code=INVALID_PARAMS, message="Invalid request parameters", data=""))
 
     async def _on_incoming_notification(self, payload: dict[str, Any]) -> None:
         """Dispatcher callback: a notification arrived from the peer."""
