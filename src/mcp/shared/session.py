@@ -69,7 +69,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
 
     def __init__(
         self,
-        request_id: RequestId,
+        request_id: RequestId | None,
         request_meta: RequestParamsMeta | None,
         request: ReceiveRequestT,
         session: BaseSession[SendRequestT, SendNotificationT, SendResultT, ReceiveRequestT, ReceiveNotificationT],
@@ -313,7 +313,7 @@ class BaseSession(
 
     async def _on_incoming_request(
         self,
-        request_id: RequestId,
+        request_id: RequestId | None,
         payload: dict[str, Any],
         metadata: MessageMetadata,
         responder: Callable[[dict[str, Any] | ErrorData], Awaitable[None]],
@@ -326,11 +326,12 @@ class BaseSession(
                 request_meta=validated_request.params.meta if validated_request.params else None,
                 request=validated_request,
                 session=self,
-                on_complete=lambda r: self._in_flight.pop(r.request_id, None),
+                on_complete=lambda r: self._in_flight.pop(r.request_id, None) if r.request_id is not None else None,
                 responder=responder,
                 message_metadata=metadata,
             )
-            self._in_flight[resp.request_id] = resp
+            if request_id is not None:
+                self._in_flight[request_id] = resp
             await self._received_request(resp)
 
             if not resp._completed:  # type: ignore[reportPrivateUsage]

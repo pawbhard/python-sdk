@@ -43,7 +43,7 @@ from mcp.types import (
 ResponderFn = Callable[[dict[str, Any] | ErrorData], Awaitable[None]]
 """Callback to send a response to an incoming request. Receives either a raw result dict or an ErrorData object."""
 
-OnRequestFn = Callable[[RequestId, dict[str, Any], MessageMetadata, ResponderFn], Awaitable[None]]
+OnRequestFn = Callable[[RequestId | None, dict[str, Any], MessageMetadata, ResponderFn], Awaitable[None]]
 """Called when the peer sends us a request. Receives ``(request_id, {"method", "params"}, metadata, responder)``."""
 
 OnNotificationFn = Callable[[dict[str, Any]], Awaitable[None]]
@@ -84,7 +84,7 @@ class Dispatcher(Protocol):
 
     async def send_request(
         self,
-        request_id: RequestId,
+        request_id: RequestId | None,
         request: dict[str, Any],
         metadata: MessageMetadata = None,
         timeout: float | None = None,

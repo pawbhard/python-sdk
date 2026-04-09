@@ -126,3 +126,35 @@ async def test_client_session_accepts_custom_dispatcher():
 async def test_base_session_requires_streams_or_dispatcher():
     with pytest.raises(TypeError, match="either dispatcher or both"):
         ClientSession()
+
+
+async def test_client_session_accepts_none_request_id():
+    """Verify that a dispatcher can safely pass request_id=None for an incoming request
+    and receive the response back through the closure."""
+    app = MCPServer("test")
+
+    @app.tool()
+    async def ping() -> str:
+        return "pong"
+
+    async with InMemoryTransport(app) as (client_read, client_write):
+        inner = JSONRPCDispatcher(client_read, client_write, response_routers=[])
+
+        async with ClientSession(dispatcher=inner) as session:
+            await session.initialize()
+
+            # Reach directly into the session's incoming dispatcher handler with ID=None
+            captured_response = None
+
+            async def mock_responder(response: dict[str, Any] | ErrorData) -> None:
+                nonlocal captured_response
+                captured_response = response
+
+            await session._on_incoming_request(  # type: ignore[reportPrivateUsage]
+                request_id=None,
+                payload={"method": "ping"},
+                metadata=None,
+                responder=mock_responder,
+            )
+
+            assert captured_response == {}
