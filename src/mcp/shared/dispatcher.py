@@ -199,7 +199,7 @@ class JSONRPCDispatcher:
                     elif isinstance(message.message, JSONRPCRequest):
                         req_id = message.message.id
 
-                        async def responder(response: dict[str, Any] | ErrorData) -> None:
+                        async def responder(response: dict[str, Any] | ErrorData, req_id=req_id) -> None:
                             await self.send_response(req_id, response)
 
                         await self._on_request(
