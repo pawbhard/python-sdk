@@ -15,13 +15,13 @@ from mcp.shared.dispatcher import (
     OnErrorFn,
     OnNotificationFn,
     OnRequestFn,
+    ReplyHandle,
 )
 from mcp.shared.message import MessageMetadata
 from mcp.types import (
     CreateMessageRequestParams,
     CreateMessageResult,
     ErrorData,
-    RequestId,
     SamplingMessage,
     TextContent,
 )
@@ -52,23 +52,22 @@ class SpyDispatcher:
 
     async def send_request(
         self,
-        request_id: RequestId,
         request: dict[str, Any],
         metadata: MessageMetadata = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
         self.sent_requests.append(request)
-        return await self._inner.send_request(request_id, request, metadata, timeout)
+        return await self._inner.send_request(request, metadata, timeout)
 
     async def send_notification(
-        self, notification: dict[str, Any], related_request_id: RequestId | None = None
+        self, notification: dict[str, Any], related_reply_handle: ReplyHandle | None = None
     ) -> None:
         self.sent_notifications.append(notification)
-        await self._inner.send_notification(notification, related_request_id)
+        await self._inner.send_notification(notification, related_reply_handle)
 
-    async def send_response(self, request_id: RequestId, response: dict[str, Any] | ErrorData) -> None:
+    async def send_response(self, handle: ReplyHandle, response: dict[str, Any] | ErrorData) -> None:
         self.sent_responses.append(response)
-        await self._inner.send_response(request_id, response)
+        await self._inner.send_response(handle, response)
 
 
 async def test_client_session_accepts_custom_dispatcher():

@@ -11,7 +11,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import Self
 
-from mcp.shared.dispatcher import Dispatcher, JSONRPCDispatcher
+from mcp.shared.dispatcher import Dispatcher, JSONRPCDispatcher, ReplyHandle
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import MessageMetadata, SessionMessage
 from mcp.shared.response_router import ResponseRouter
@@ -70,6 +70,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
     def __init__(
         self,
         request_id: RequestId,
+        reply_handle: ReplyHandle,
         request_meta: RequestParamsMeta | None,
         request: ReceiveRequestT,
         session: BaseSession[SendRequestT, SendNotificationT, SendResultT, ReceiveRequestT, ReceiveNotificationT],
@@ -77,6 +78,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
         message_metadata: MessageMetadata = None,
     ) -> None:
         self.request_id = request_id
+        self.reply_handle = reply_handle
         self.request_meta = request_meta
         self.request = request
         self.message_metadata = message_metadata
@@ -126,7 +128,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
             self._completed = True
 
             await self._session._send_response(  # type: ignore[reportPrivateUsage]
-                request_id=self.request_id, response=response
+                reply_handle=self.reply_handle, response=response
             )
 
     async def cancel(self) -> None:
@@ -140,7 +142,7 @@ class RequestResponder(Generic[ReceiveRequestT, SendResultT]):
         self._completed = True  # Mark as completed so it's removed from in_flight
         # Send an error response to indicate cancellation
         await self._session._send_response(  # type: ignore[reportPrivateUsage]
-            request_id=self.request_id,
+            reply_handle=self.reply_handle,
             response=ErrorData(code=0, message="Request cancelled"),
         )
 
@@ -260,34 +262,34 @@ class BaseSession(
 
         Do not use this method to emit notifications! Use send_notification() instead.
         """
-        request_id = self._request_id
-        self._request_id = request_id + 1
+        # progress_token is the session's own counter, used for progress tracking only.
+        # The dispatcher generates its own wire-level request ID internally.
+        progress_token = self._request_id
+        self._request_id = progress_token + 1
 
         # Set up progress token if progress callback is provided
         request_data = request.model_dump(by_alias=True, mode="json", exclude_none=True)
         if progress_callback is not None:
-            # Use request_id as progress token
             if "params" not in request_data:  # pragma: lax no cover
                 request_data["params"] = {}
             if "_meta" not in request_data["params"]:  # pragma: lax no cover
                 request_data["params"]["_meta"] = {}
-            request_data["params"]["_meta"]["progressToken"] = request_id
-            # Store the callback for this request
-            self._progress_callbacks[request_id] = progress_callback
+            request_data["params"]["_meta"]["progressToken"] = progress_token
+            self._progress_callbacks[progress_token] = progress_callback
 
         # request read timeout takes precedence over session read timeout
         timeout = request_read_timeout_seconds or self._session_read_timeout_seconds
 
         try:
             try:
-                result = await self._dispatcher.send_request(request_id, request_data, metadata, timeout)
+                result = await self._dispatcher.send_request(request_data, metadata, timeout)
             except TimeoutError:
                 class_name = request.__class__.__name__
                 message = f"Timed out while waiting for response to {class_name}. Waited {timeout} seconds."
                 raise MCPError(code=REQUEST_TIMEOUT, message=message)
             return result_type.model_validate(result, by_name=False)
         finally:
-            self._progress_callbacks.pop(request_id, None)
+            self._progress_callbacks.pop(progress_token, None)
 
     async def send_notification(
         self,
@@ -302,12 +304,12 @@ class BaseSession(
             related_request_id,
         )
 
-    async def _send_response(self, request_id: RequestId, response: SendResultT | ErrorData) -> None:
+    async def _send_response(self, reply_handle: ReplyHandle, response: SendResultT | ErrorData) -> None:
         if isinstance(response, ErrorData):
-            await self._dispatcher.send_response(request_id, response)
+            await self._dispatcher.send_response(reply_handle, response)
         else:
             await self._dispatcher.send_response(
-                request_id,
+                reply_handle,
                 response.model_dump(by_alias=True, mode="json", exclude_none=True),
             )
 
@@ -321,13 +323,14 @@ class BaseSession(
         raise NotImplementedError
 
     async def _on_incoming_request(
-        self, request_id: RequestId, payload: dict[str, Any], metadata: MessageMetadata
+        self, request_id: RequestId, reply_handle: ReplyHandle, payload: dict[str, Any], metadata: MessageMetadata
     ) -> None:
         """Dispatcher callback: a request arrived from the peer."""
         try:
             validated_request = self._receive_request_adapter.validate_python(payload, by_name=False)
             responder = RequestResponder(
                 request_id=request_id,
+                reply_handle=reply_handle,
                 request_meta=validated_request.params.meta if validated_request.params else None,
                 request=validated_request,
                 session=self,
@@ -343,7 +346,7 @@ class BaseSession(
             logging.warning("Failed to validate request", exc_info=True)
             logging.debug(f"Message that failed validation: {payload}")
             await self._dispatcher.send_response(
-                request_id,
+                reply_handle,
                 ErrorData(code=INVALID_PARAMS, message="Invalid request parameters", data=""),
             )
 
