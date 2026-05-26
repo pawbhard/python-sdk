@@ -14,9 +14,7 @@ from mcp.shared.experimental.tasks.message_queue import InMemoryTaskMessageQueue
 from mcp.shared.experimental.tasks.resolver import Resolver
 from mcp.shared.message import SessionMessage
 from mcp.types import (
-    INVALID_REQUEST,
     CallToolResult,
-    ErrorData,
     GetTaskPayloadRequest,
     GetTaskPayloadRequestParams,
     GetTaskPayloadResult,
@@ -163,77 +161,10 @@ async def test_handle_waits_for_task_completion(
 
 
 @pytest.mark.anyio
-async def test_route_response_resolves_pending_request(
+async def test_deliver_sends_request_and_resolves_resolver(
     store: InMemoryTaskStore, queue: InMemoryTaskMessageQueue, handler: TaskResultHandler
 ) -> None:
-    """Test that route_response() resolves a pending request."""
-    resolver: Resolver[dict[str, Any]] = Resolver()
-    handler._pending_requests["req-123"] = resolver
-
-    result = handler.route_response("req-123", {"status": "ok"})
-
-    assert result is True
-    assert resolver.done()
-    assert await resolver.wait() == {"status": "ok"}
-
-
-@pytest.mark.anyio
-async def test_route_response_returns_false_for_unknown_request(
-    store: InMemoryTaskStore, queue: InMemoryTaskMessageQueue, handler: TaskResultHandler
-) -> None:
-    """Test that route_response() returns False for unknown request ID."""
-    result = handler.route_response("unknown-req", {"status": "ok"})
-    assert result is False
-
-
-@pytest.mark.anyio
-async def test_route_response_returns_false_for_already_done_resolver(
-    store: InMemoryTaskStore, queue: InMemoryTaskMessageQueue, handler: TaskResultHandler
-) -> None:
-    """Test that route_response() returns False if resolver already completed."""
-    resolver: Resolver[dict[str, Any]] = Resolver()
-    resolver.set_result({"already": "done"})
-    handler._pending_requests["req-123"] = resolver
-
-    result = handler.route_response("req-123", {"new": "data"})
-
-    assert result is False
-
-
-@pytest.mark.anyio
-async def test_route_error_resolves_pending_request_with_exception(
-    store: InMemoryTaskStore, queue: InMemoryTaskMessageQueue, handler: TaskResultHandler
-) -> None:
-    """Test that route_error() sets exception on pending request."""
-    resolver: Resolver[dict[str, Any]] = Resolver()
-    handler._pending_requests["req-123"] = resolver
-
-    error = ErrorData(code=INVALID_REQUEST, message="Something went wrong")
-    result = handler.route_error("req-123", error)
-
-    assert result is True
-    assert resolver.done()
-
-    with pytest.raises(MCPError) as exc_info:
-        await resolver.wait()
-    assert exc_info.value.error.message == "Something went wrong"
-
-
-@pytest.mark.anyio
-async def test_route_error_returns_false_for_unknown_request(
-    store: InMemoryTaskStore, queue: InMemoryTaskMessageQueue, handler: TaskResultHandler
-) -> None:
-    """Test that route_error() returns False for unknown request ID."""
-    error = ErrorData(code=INVALID_REQUEST, message="Error")
-    result = handler.route_error("unknown-req", error)
-    assert result is False
-
-
-@pytest.mark.anyio
-async def test_deliver_registers_resolver_for_request_messages(
-    store: InMemoryTaskStore, queue: InMemoryTaskMessageQueue, handler: TaskResultHandler
-) -> None:
-    """Test that _deliver_queued_messages registers resolvers for request messages."""
+    """Test that _deliver_queued_messages sends requests via session.send_request and sets the resolver result."""
     task = await store.create_task(TaskMetadata(ttl=60000), task_id="test-task")
 
     resolver: Resolver[dict[str, Any]] = Resolver()
@@ -243,27 +174,39 @@ async def test_deliver_registers_resolver_for_request_messages(
             jsonrpc="2.0",
             id="inner-req-1",
             method="elicitation/create",
-            params={},
+            params={"message": "continue?", "requestedSchema": {"type": "object"}},
         ),
         resolver=resolver,
         original_request_id="inner-req-1",
     )
     await queue.enqueue(task.task_id, queued_msg)
 
-    mock_session = Mock()
-    mock_session.send_message = AsyncMock()
+    from mcp import types
+
+    mock_session = AsyncMock()
+    mock_session.send_request = AsyncMock(return_value=types.ElicitResult(action="accept", content={"ok": True}))
 
     await handler._deliver_queued_messages(task.task_id, mock_session, "outer-req-1")
 
-    assert "inner-req-1" in handler._pending_requests
-    assert handler._pending_requests["inner-req-1"] is resolver
+    # Assert send_request was called with parsed ElicitRequest!
+    mock_session.send_request.assert_called_once()
+    args, kwargs = mock_session.send_request.call_args
+    request_arg = kwargs.get("request") or args[0]
+    assert isinstance(request_arg, types.ElicitRequest)
+    assert request_arg.params.message == "continue?"
+    assert (kwargs.get("result_type") or args[1]) == types.ElicitResult
+
+    # Assert the resolver got completed with the return value!
+    assert resolver.done()
+    res = await resolver.wait()
+    assert res == {"action": "accept", "content": {"ok": True}}
 
 
 @pytest.mark.anyio
-async def test_deliver_skips_resolver_registration_when_no_original_id(
+async def test_deliver_sends_sampling_request_and_resolves_resolver(
     store: InMemoryTaskStore, queue: InMemoryTaskMessageQueue, handler: TaskResultHandler
 ) -> None:
-    """Test that _deliver_queued_messages skips resolver registration when original_request_id is None."""
+    """Test that _deliver_queued_messages sends sampling requests and resolves the resolver."""
     task = await store.create_task(TaskMetadata(ttl=60000), task_id="test-task")
 
     resolver: Resolver[dict[str, Any]] = Resolver()
@@ -271,24 +214,36 @@ async def test_deliver_skips_resolver_registration_when_no_original_id(
         type="request",
         message=JSONRPCRequest(
             jsonrpc="2.0",
-            id="inner-req-1",
-            method="elicitation/create",
-            params={},
+            id="req-no-tools",
+            method="sampling/createMessage",
+            params={"messages": [], "max_tokens": 10},
         ),
         resolver=resolver,
-        original_request_id=None,  # No original request ID
+        original_request_id="req-no-tools",
     )
     await queue.enqueue(task.task_id, queued_msg)
 
-    mock_session = Mock()
-    mock_session.send_message = AsyncMock()
+    from mcp import types
+
+    mock_session = AsyncMock()
+    mock_session.send_request = AsyncMock(
+        return_value=types.CreateMessageResult(
+            role="assistant",
+            content=types.TextContent(type="text", text="hello"),
+            model="mock-model",
+        )
+    )
 
     await handler._deliver_queued_messages(task.task_id, mock_session, "outer-req-1")
 
-    # Resolver should NOT be registered since original_request_id is None
-    assert len(handler._pending_requests) == 0
-    # But the message should still be sent
-    mock_session.send_message.assert_called_once()
+    # Verify it requested CreateMessageResult
+    args, kwargs = mock_session.send_request.call_args
+    assert (kwargs.get("result_type") or args[1]) == types.CreateMessageResult
+    assert resolver.done()
+    res = await resolver.wait()
+    assert res["content"]["text"] == "hello"
+    assert res["role"] == "assistant"
+    assert res["model"] == "mock-model"
 
 
 @pytest.mark.anyio

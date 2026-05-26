@@ -87,18 +87,8 @@ class TaskSupport:
                 self._task_group = None
 
     def configure_session(self, session: ServerSession) -> None:
-        """Configure a session for task support.
-
-        This registers the result handler as a response router so that
-        responses to queued requests (elicitation, sampling) are routed
-        back to the waiting resolvers.
-
-        Called automatically by Server.run() for each new session.
-
-        Args:
-            session: The session to configure
-        """
-        session.add_response_router(self.handler)
+        """Configure a session for task support (no-op since routing is native now)."""
+        pass
 
     @classmethod
     def in_memory(cls) -> "TaskSupport":

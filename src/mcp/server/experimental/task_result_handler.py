@@ -14,16 +14,15 @@ from typing import Any
 
 import anyio
 
+from mcp import types
 from mcp.server.session import ServerSession
 from mcp.shared.exceptions import MCPError
 from mcp.shared.experimental.tasks.helpers import RELATED_TASK_METADATA_KEY, is_terminal
-from mcp.shared.experimental.tasks.message_queue import TaskMessageQueue
-from mcp.shared.experimental.tasks.resolver import Resolver
+from mcp.shared.experimental.tasks.message_queue import QueuedMessage, TaskMessageQueue
 from mcp.shared.experimental.tasks.store import TaskStore
 from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.types import (
     INVALID_PARAMS,
-    ErrorData,
     GetTaskPayloadRequest,
     GetTaskPayloadResult,
     RelatedTaskMetadata,
@@ -61,19 +60,6 @@ class TaskResultHandler:
     ):
         self._store = store
         self._queue = queue
-        # Map from internal request ID to resolver for routing responses
-        self._pending_requests: dict[RequestId, Resolver[dict[str, Any]]] = {}
-
-    async def send_message(
-        self,
-        session: ServerSession,
-        message: SessionMessage,
-    ) -> None:
-        """Send a message via the session.
-
-        This is a helper for delivering queued task messages.
-        """
-        await session.send_message(message)
 
     async def handle(
         self,
@@ -107,12 +93,14 @@ class TaskResultHandler:
 
             await self._deliver_queued_messages(task_id, session, request_id)
 
+            # Re-query the task status since delivery blocks might have driven it to a terminal state
+            task = await self._store.get_task(task_id)
+            if task is None:
+                raise MCPError(code=INVALID_PARAMS, message=f"Task not found: {task_id}")
+
             # If task is terminal, return result
             if is_terminal(task.status):
                 result = await self._store.get_result(task_id)
-                # GetTaskPayloadResult is a Result with extra="allow"
-                # The stored result contains the actual payload data
-                # Per spec: tasks/result MUST include _meta with related-task metadata
                 related_task = RelatedTaskMetadata(task_id=task_id)
                 related_task_meta: dict[str, Any] = {RELATED_TASK_METADATA_KEY: related_task.model_dump(by_alias=True)}
                 if result is not None:
@@ -133,29 +121,82 @@ class TaskResultHandler:
     ) -> None:
         """Dequeue and send all pending messages for a task.
 
-        Each message is sent via the session's write stream with
-        relatedRequestId set so responses route back to this stream.
+        Each message is sent via standard session.send_request inside a task group
+        so that responses are automatically matched and routed by the session pipeline.
         """
-        while True:
-            message = await self._queue.dequeue(task_id)
-            if message is None:
-                break
+        metadata = ServerMessageMetadata(related_request_id=request_id)
 
-            # If this is a request (not notification), wait for response
-            if message.type == "request" and message.resolver is not None:
-                # Store the resolver so we can route the response back
-                original_id = message.original_request_id
-                if original_id is not None:
-                    self._pending_requests[original_id] = message.resolver
+        async with anyio.create_task_group() as tg:
+            while True:
+                message = await self._queue.dequeue(task_id)
+                if message is None:
+                    break
 
-            logger.debug("Delivering queued message for task %s: %s", task_id, message.type)
+                logger.debug("Delivering queued message for task %s: %s", task_id, message.type)
 
-            # Send the message with relatedRequestId for routing
-            session_message = SessionMessage(
-                message=message.message,
-                metadata=ServerMessageMetadata(related_request_id=request_id),
+                if message.type == "request" and message.resolver is not None:
+                    tg.start_soon(self._send_and_resolve_request, session, message, metadata)
+                elif message.type == "notification":
+                    try:
+                        # Parse the raw JSON-RPC notification dictionary back
+                        # to a standard Pydantic ServerNotification model
+                        notification_dict = message.message.model_dump(by_alias=True, mode="json", exclude_none=True)
+                        notification = types.server_notification_adapter.validate_python(notification_dict)
+                        await session.send_notification(notification, related_request_id=request_id)
+                    except Exception:
+                        # Fallback for custom or raw/unregistered messages: deliver directly to the write stream
+                        session_message = SessionMessage(
+                            message=message.message,
+                            metadata=ServerMessageMetadata(related_request_id=request_id),
+                        )
+                        await session.send_message(session_message)
+
+    async def _send_and_resolve_request(
+        self,
+        session: ServerSession,
+        message: QueuedMessage,
+        metadata: ServerMessageMetadata,
+    ) -> None:
+        """Helper to send a single enqueued request and resolve its returned result."""
+        try:
+            # Parse raw JSON-RPC fields back into standard Pydantic models for session.send_request
+            if message.message.method == "elicitation/create":
+                params_dict = message.message.params or {}
+                if "url" in params_dict:
+                    params = types.ElicitRequestURLParams.model_validate(params_dict)
+                else:
+                    params = types.ElicitRequestFormParams.model_validate(params_dict)
+                request = types.ElicitRequest(params=params)
+                if params.task is not None:
+                    result_type = types.CreateTaskResult
+                else:
+                    result_type = types.ElicitResult
+            elif message.message.method == "sampling/createMessage":
+                params_dict = message.message.params or {}
+                params = types.CreateMessageRequestParams.model_validate(params_dict)
+                request = types.CreateMessageRequest(params=params)
+                if params.task is not None:
+                    result_type = types.CreateTaskResult
+                elif params.tools is not None:
+                    result_type = types.CreateMessageResultWithTools
+                else:
+                    result_type = types.CreateMessageResult
+            else:
+                raise ValueError(f"Unsupported queued request method: {message.message.method}")
+
+            # Send standard Pydantic request model and block wait for the response model
+            res = await session.send_request(
+                request=request,
+                result_type=result_type,
+                metadata=metadata,
             )
-            await self.send_message(session, session_message)
+            # Safe back-dump to dict for standard raw resolver signature
+            assert message.resolver is not None, "Resolver must not be None for queued requests"
+            message.resolver.set_result(res.model_dump(by_alias=True, exclude_none=True))
+        except Exception as e:
+            assert message.resolver is not None, "Resolver must not be None for queued requests"
+            logger.exception("Failed to send and resolve enqueued task request")
+            message.resolver.set_exception(e)
 
     async def _wait_for_task_update(self, task_id: str) -> None:
         """Wait for task to be updated (status change or new message).
@@ -182,37 +223,3 @@ class TaskResultHandler:
 
             tg.start_soon(wait_for_store)
             tg.start_soon(wait_for_queue)
-
-    def route_response(self, request_id: RequestId, response: dict[str, Any]) -> bool:
-        """Route a response back to the waiting resolver.
-
-        This is called when a response arrives for a queued request.
-
-        Args:
-            request_id: The request ID from the response
-            response: The response data
-
-        Returns:
-            True if response was routed, False if no pending request
-        """
-        resolver = self._pending_requests.pop(request_id, None)
-        if resolver is not None and not resolver.done():
-            resolver.set_result(response)
-            return True
-        return False
-
-    def route_error(self, request_id: RequestId, error: ErrorData) -> bool:
-        """Route an error back to the waiting resolver.
-
-        Args:
-            request_id: The request ID from the error response
-            error: The error data
-
-        Returns:
-            True if error was routed, False if no pending request
-        """
-        resolver = self._pending_requests.pop(request_id, None)
-        if resolver is not None and not resolver.done():
-            resolver.set_exception(MCPError.from_error_data(error))
-            return True
-        return False

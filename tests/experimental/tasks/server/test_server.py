@@ -1,7 +1,6 @@
 """Tests for server-side task support (handlers, capabilities, integration)."""
 
 from datetime import datetime, timezone
-from typing import Any
 
 import anyio
 import pytest
@@ -14,10 +13,8 @@ from mcp.server.models import InitializationOptions
 from mcp.server.session import ServerSession
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import ServerMessageMetadata, SessionMessage
-from mcp.shared.response_router import ResponseRouter
 from mcp.shared.session import RequestResponder
 from mcp.types import (
-    INVALID_REQUEST,
     TASK_FORBIDDEN,
     TASK_OPTIONAL,
     TASK_REQUIRED,
@@ -27,15 +24,12 @@ from mcp.types import (
     CancelTaskRequestParams,
     CancelTaskResult,
     ClientResult,
-    ErrorData,
     GetTaskPayloadRequest,
     GetTaskPayloadRequestParams,
     GetTaskPayloadResult,
     GetTaskRequestParams,
     GetTaskResult,
-    JSONRPCError,
     JSONRPCNotification,
-    JSONRPCResponse,
     ListTasksResult,
     ListToolsResult,
     PaginatedRequestParams,
@@ -564,232 +558,6 @@ async def test_send_message() -> None:
             received = await server_to_client_receive.receive()
             assert isinstance(received.message, JSONRPCNotification)
             assert received.message.method == "test/notification"
-    finally:  # pragma: lax no cover
-        await server_to_client_send.aclose()
-        await server_to_client_receive.aclose()
-        await client_to_server_send.aclose()
-        await client_to_server_receive.aclose()
-
-
-@pytest.mark.anyio
-async def test_response_routing_success() -> None:
-    """Test that response routing works for success responses."""
-    server_to_client_send, server_to_client_receive = anyio.create_memory_object_stream[SessionMessage](10)
-    client_to_server_send, client_to_server_receive = anyio.create_memory_object_stream[SessionMessage](10)
-
-    # Track routed responses with event for synchronization
-    routed_responses: list[dict[str, Any]] = []
-    response_received = anyio.Event()
-
-    class TestRouter(ResponseRouter):
-        def route_response(self, request_id: str | int, response: dict[str, Any]) -> bool:
-            routed_responses.append({"id": request_id, "response": response})
-            response_received.set()
-            return True  # Handled
-
-        def route_error(self, request_id: str | int, error: ErrorData) -> bool:
-            raise NotImplementedError
-
-    try:
-        async with ServerSession(
-            client_to_server_receive,
-            server_to_client_send,
-            InitializationOptions(
-                server_name="test-server",
-                server_version="1.0.0",
-                capabilities=ServerCapabilities(),
-            ),
-        ) as server_session:
-            router = TestRouter()
-            server_session.add_response_router(router)
-
-            # Simulate receiving a response from client
-            response = JSONRPCResponse(jsonrpc="2.0", id="test-req-1", result={"status": "ok"})
-            message = SessionMessage(message=response)
-
-            # Send from "client" side
-            await client_to_server_send.send(message)
-
-            # Wait for response to be routed
-            with anyio.fail_after(5):
-                await response_received.wait()
-
-            # Verify response was routed
-            assert len(routed_responses) == 1
-            assert routed_responses[0]["id"] == "test-req-1"
-            assert routed_responses[0]["response"]["status"] == "ok"
-    finally:  # pragma: lax no cover
-        await server_to_client_send.aclose()
-        await server_to_client_receive.aclose()
-        await client_to_server_send.aclose()
-        await client_to_server_receive.aclose()
-
-
-@pytest.mark.anyio
-async def test_response_routing_error() -> None:
-    """Test that error routing works for error responses."""
-    server_to_client_send, server_to_client_receive = anyio.create_memory_object_stream[SessionMessage](10)
-    client_to_server_send, client_to_server_receive = anyio.create_memory_object_stream[SessionMessage](10)
-
-    # Track routed errors with event for synchronization
-    routed_errors: list[dict[str, Any]] = []
-    error_received = anyio.Event()
-
-    class TestRouter(ResponseRouter):
-        def route_response(self, request_id: str | int, response: dict[str, Any]) -> bool:
-            raise NotImplementedError
-
-        def route_error(self, request_id: str | int, error: ErrorData) -> bool:
-            routed_errors.append({"id": request_id, "error": error})
-            error_received.set()
-            return True  # Handled
-
-    try:
-        async with ServerSession(
-            client_to_server_receive,
-            server_to_client_send,
-            InitializationOptions(
-                server_name="test-server",
-                server_version="1.0.0",
-                capabilities=ServerCapabilities(),
-            ),
-        ) as server_session:
-            router = TestRouter()
-            server_session.add_response_router(router)
-
-            # Simulate receiving an error response from client
-            error_data = ErrorData(code=INVALID_REQUEST, message="Test error")
-            error_response = JSONRPCError(jsonrpc="2.0", id="test-req-2", error=error_data)
-            message = SessionMessage(message=error_response)
-
-            # Send from "client" side
-            await client_to_server_send.send(message)
-
-            # Wait for error to be routed
-            with anyio.fail_after(5):
-                await error_received.wait()
-
-            # Verify error was routed
-            assert len(routed_errors) == 1
-            assert routed_errors[0]["id"] == "test-req-2"
-            assert routed_errors[0]["error"].message == "Test error"
-    finally:  # pragma: lax no cover
-        await server_to_client_send.aclose()
-        await server_to_client_receive.aclose()
-        await client_to_server_send.aclose()
-        await client_to_server_receive.aclose()
-
-
-@pytest.mark.anyio
-async def test_response_routing_skips_non_matching_routers() -> None:
-    """Test that routing continues to next router when first doesn't match."""
-    server_to_client_send, server_to_client_receive = anyio.create_memory_object_stream[SessionMessage](10)
-    client_to_server_send, client_to_server_receive = anyio.create_memory_object_stream[SessionMessage](10)
-
-    # Track which routers were called
-    router_calls: list[str] = []
-    response_received = anyio.Event()
-
-    class NonMatchingRouter(ResponseRouter):
-        def route_response(self, request_id: str | int, response: dict[str, Any]) -> bool:
-            router_calls.append("non_matching_response")
-            return False  # Doesn't handle it
-
-        def route_error(self, request_id: str | int, error: ErrorData) -> bool:
-            raise NotImplementedError
-
-    class MatchingRouter(ResponseRouter):
-        def route_response(self, request_id: str | int, response: dict[str, Any]) -> bool:
-            router_calls.append("matching_response")
-            response_received.set()
-            return True  # Handles it
-
-        def route_error(self, request_id: str | int, error: ErrorData) -> bool:
-            raise NotImplementedError
-
-    try:
-        async with ServerSession(
-            client_to_server_receive,
-            server_to_client_send,
-            InitializationOptions(
-                server_name="test-server",
-                server_version="1.0.0",
-                capabilities=ServerCapabilities(),
-            ),
-        ) as server_session:
-            # Add non-matching router first, then matching router
-            server_session.add_response_router(NonMatchingRouter())
-            server_session.add_response_router(MatchingRouter())
-
-            # Send a response - should skip first router and be handled by second
-            response = JSONRPCResponse(jsonrpc="2.0", id="test-req-1", result={"status": "ok"})
-            message = SessionMessage(message=response)
-            await client_to_server_send.send(message)
-
-            with anyio.fail_after(5):
-                await response_received.wait()
-
-            # Verify both routers were called (first returned False, second returned True)
-            assert router_calls == ["non_matching_response", "matching_response"]
-    finally:  # pragma: lax no cover
-        await server_to_client_send.aclose()
-        await server_to_client_receive.aclose()
-        await client_to_server_send.aclose()
-        await client_to_server_receive.aclose()
-
-
-@pytest.mark.anyio
-async def test_error_routing_skips_non_matching_routers() -> None:
-    """Test that error routing continues to next router when first doesn't match."""
-    server_to_client_send, server_to_client_receive = anyio.create_memory_object_stream[SessionMessage](10)
-    client_to_server_send, client_to_server_receive = anyio.create_memory_object_stream[SessionMessage](10)
-
-    # Track which routers were called
-    router_calls: list[str] = []
-    error_received = anyio.Event()
-
-    class NonMatchingRouter(ResponseRouter):
-        def route_response(self, request_id: str | int, response: dict[str, Any]) -> bool:
-            raise NotImplementedError
-
-        def route_error(self, request_id: str | int, error: ErrorData) -> bool:
-            router_calls.append("non_matching_error")
-            return False  # Doesn't handle it
-
-    class MatchingRouter(ResponseRouter):
-        def route_response(self, request_id: str | int, response: dict[str, Any]) -> bool:
-            raise NotImplementedError
-
-        def route_error(self, request_id: str | int, error: ErrorData) -> bool:
-            router_calls.append("matching_error")
-            error_received.set()
-            return True  # Handles it
-
-    try:
-        async with ServerSession(
-            client_to_server_receive,
-            server_to_client_send,
-            InitializationOptions(
-                server_name="test-server",
-                server_version="1.0.0",
-                capabilities=ServerCapabilities(),
-            ),
-        ) as server_session:
-            # Add non-matching router first, then matching router
-            server_session.add_response_router(NonMatchingRouter())
-            server_session.add_response_router(MatchingRouter())
-
-            # Send an error - should skip first router and be handled by second
-            error_data = ErrorData(code=INVALID_REQUEST, message="Test error")
-            error_response = JSONRPCError(jsonrpc="2.0", id="test-req-2", error=error_data)
-            message = SessionMessage(message=error_response)
-            await client_to_server_send.send(message)
-
-            with anyio.fail_after(5):
-                await error_received.wait()
-
-            # Verify both routers were called (first returned False, second returned True)
-            assert router_calls == ["non_matching_error", "matching_error"]
     finally:  # pragma: lax no cover
         await server_to_client_send.aclose()
         await server_to_client_receive.aclose()

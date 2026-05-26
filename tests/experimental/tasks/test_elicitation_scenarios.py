@@ -356,7 +356,6 @@ async def test_scenario3_task_augmented_tool_normal_elicitation() -> None:
                 message="Please confirm the action",
                 requested_schema={"type": "object", "properties": {"confirm": {"type": "boolean"}}},
             )
-
             confirmed = result.content.get("confirm", False) if result.content else False
             work_completed.set()
             return CallToolResult(content=[TextContent(type="text", text="confirmed" if confirmed else "cancelled")])

@@ -223,7 +223,6 @@ class ServerTaskContext:
         request_id: RequestId = request.id
 
         resolver: Resolver[dict[str, Any]] = Resolver()
-        self._handler._pending_requests[request_id] = resolver  # pyright: ignore[reportPrivateUsage]
 
         queued = QueuedMessage(
             type="request",
@@ -293,7 +292,6 @@ class ServerTaskContext:
         request_id: RequestId = request.id
 
         resolver: Resolver[dict[str, Any]] = Resolver()
-        self._handler._pending_requests[request_id] = resolver  # pyright: ignore[reportPrivateUsage]
 
         queued = QueuedMessage(
             type="request",
@@ -383,7 +381,6 @@ class ServerTaskContext:
         request_id: RequestId = request.id
 
         resolver: Resolver[dict[str, Any]] = Resolver()
-        self._handler._pending_requests[request_id] = resolver  # pyright: ignore[reportPrivateUsage]
 
         queued = QueuedMessage(
             type="request",
@@ -448,7 +445,6 @@ class ServerTaskContext:
         request_id: RequestId = request.id
 
         resolver: Resolver[dict[str, Any]] = Resolver()
-        self._handler._pending_requests[request_id] = resolver  # pyright: ignore[reportPrivateUsage]
 
         queued = QueuedMessage(
             type="request",
@@ -553,7 +549,6 @@ class ServerTaskContext:
         request_id: RequestId = request.id
 
         resolver: Resolver[dict[str, Any]] = Resolver()
-        self._handler._pending_requests[request_id] = resolver  # pyright: ignore[reportPrivateUsage]
 
         queued = QueuedMessage(
             type="request",
