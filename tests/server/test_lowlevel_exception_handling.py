@@ -1,64 +1,8 @@
-from unittest.mock import AsyncMock, Mock
-
 import anyio
 import pytest
 
-from mcp import types
 from mcp.server.lowlevel.server import Server
-from mcp.server.session import ServerSession
 from mcp.shared.message import SessionMessage
-from mcp.shared.session import RequestResponder
-
-
-@pytest.mark.anyio
-async def test_exception_handling_with_raise_exceptions_true():
-    """Transport exceptions are re-raised when raise_exceptions=True."""
-    server = Server("test-server")
-    session = Mock(spec=ServerSession)
-
-    test_exception = RuntimeError("Test error")
-
-    with pytest.raises(RuntimeError, match="Test error"):
-        await server._handle_message(test_exception, session, {}, raise_exceptions=True)
-
-
-@pytest.mark.anyio
-async def test_exception_handling_with_raise_exceptions_false():
-    """Transport exceptions are logged locally but not sent to the client.
-
-    The transport that reported the error is likely broken; writing back
-    through it races with stream closure (#1967, #2064). The TypeScript,
-    Go, and C# SDKs all log locally only.
-    """
-    server = Server("test-server")
-    session = Mock(spec=ServerSession)
-    session.send_log_message = AsyncMock()
-
-    await server._handle_message(RuntimeError("Test error"), session, {}, raise_exceptions=False)
-
-    session.send_log_message.assert_not_called()
-
-
-@pytest.mark.anyio
-async def test_normal_message_handling_not_affected():
-    """Test that normal messages still work correctly"""
-    server = Server("test-server")
-    session = Mock(spec=ServerSession)
-
-    # Create a mock RequestResponder
-    responder = Mock(spec=RequestResponder)
-    responder.request = types.PingRequest(method="ping")
-    responder.__enter__ = Mock(return_value=responder)
-    responder.__exit__ = Mock(return_value=None)
-
-    # Mock the _handle_request method to avoid complex setup
-    server._handle_request = AsyncMock()
-
-    # Should handle normally without any exception handling
-    await server._handle_message(responder, session, {}, raise_exceptions=False)
-
-    # Verify _handle_request was called
-    server._handle_request.assert_called_once()
 
 
 @pytest.mark.anyio

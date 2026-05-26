@@ -7,9 +7,6 @@ import pytest
 from mcp import Client, types
 from mcp.client.session import ClientSession
 from mcp.server import Server, ServerRequestContext
-from mcp.server.lowlevel import NotificationOptions
-from mcp.server.models import InitializationOptions
-from mcp.server.session import ServerSession
 from mcp.shared.message import SessionMessage
 from mcp.shared.session import RequestResponder
 
@@ -23,21 +20,12 @@ async def test_bidirectional_progress_notifications():
 
     # Run a server session so we can send progress updates in tool
     async def run_server():
-        # Create a server session
-        async with ServerSession(
+        await server.run(
             client_to_server_receive,
             server_to_client_send,
-            InitializationOptions(
-                server_name="ProgressTestServer",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(NotificationOptions(), {}),
-            ),
-        ) as server_session:
-            async for message in server_session.incoming_messages:
-                try:
-                    await server._handle_message(message, server_session, {})
-                except Exception as e:  # pragma: no cover
-                    raise e
+            initialization_options=server.create_initialization_options(),
+            stateless=True,
+        )
 
     # Track progress updates
     server_progress_updates: list[dict[str, Any]] = []

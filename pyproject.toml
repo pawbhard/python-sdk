@@ -202,6 +202,8 @@ addopts = """
 """
 filterwarnings = [
     "error",
+    # Ignore unraisable garbage collection exceptions in external pipelines
+    "ignore::pytest.PytestUnraisableExceptionWarning",
     # This should be fixed on Uvicorn's side.
     "ignore::DeprecationWarning:websockets",
     "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",

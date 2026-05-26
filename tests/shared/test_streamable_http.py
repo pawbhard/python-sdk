@@ -1101,7 +1101,7 @@ async def test_streamable_http_client_error_handling(initialized_client_session:
     """Test error handling in client."""
     with pytest.raises(MCPError) as exc_info:
         await initialized_client_session.read_resource(uri="unknown://test-error")
-    assert exc_info.value.error.code == 0
+    assert exc_info.value.error.code == -32603
     assert "Unknown resource: unknown://test-error" in exc_info.value.error.message
 
 

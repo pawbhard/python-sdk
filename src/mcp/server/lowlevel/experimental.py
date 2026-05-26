@@ -181,7 +181,7 @@ class ExperimentalHandlers(Generic[LifespanResultT]):
             ) -> GetTaskPayloadResult:
                 assert ctx.request_id is not None
                 req = GetTaskPayloadRequest(params=params)
-                result = await task_support.handler.handle(req, ctx.session, ctx.request_id)
+                result = await task_support.handler.handle(req, ctx, ctx.request_id)
                 return result
 
             self._add_request_handler("tasks/result", _default_get_task_result)

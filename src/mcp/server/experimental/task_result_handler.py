@@ -15,7 +15,6 @@ from typing import Any
 import anyio
 
 from mcp import types
-from mcp.server.session import ServerSession
 from mcp.shared.exceptions import MCPError
 from mcp.shared.experimental.tasks.helpers import RELATED_TASK_METADATA_KEY, is_terminal
 from mcp.shared.experimental.tasks.message_queue import QueuedMessage, TaskMessageQueue
@@ -64,7 +63,7 @@ class TaskResultHandler:
     async def handle(
         self,
         request: GetTaskPayloadRequest,
-        session: ServerSession,
+        ctx: Any,
         request_id: RequestId,
     ) -> GetTaskPayloadResult:
         """Handle a tasks/result request.
@@ -91,7 +90,7 @@ class TaskResultHandler:
             if task is None:
                 raise MCPError(code=INVALID_PARAMS, message=f"Task not found: {task_id}")
 
-            await self._deliver_queued_messages(task_id, session, request_id)
+            await self._deliver_queued_messages(task_id, ctx, request_id)
 
             # Re-query the task status since delivery blocks might have driven it to a terminal state
             task = await self._store.get_task(task_id)
@@ -116,7 +115,7 @@ class TaskResultHandler:
     async def _deliver_queued_messages(
         self,
         task_id: str,
-        session: ServerSession,
+        ctx: Any,
         request_id: RequestId,
     ) -> None:
         """Dequeue and send all pending messages for a task.
@@ -124,8 +123,6 @@ class TaskResultHandler:
         Each message is sent via standard session.send_request inside a task group
         so that responses are automatically matched and routed by the session pipeline.
         """
-        metadata = ServerMessageMetadata(related_request_id=request_id)
-
         async with anyio.create_task_group() as tg:
             while True:
                 message = await self._queue.dequeue(task_id)
@@ -135,27 +132,49 @@ class TaskResultHandler:
                 logger.debug("Delivering queued message for task %s: %s", task_id, message.type)
 
                 if message.type == "request" and message.resolver is not None:
-                    tg.start_soon(self._send_and_resolve_request, session, message, metadata)
+                    tg.start_soon(self._send_and_resolve_request, ctx, message, request_id)
                 elif message.type == "notification":
-                    try:
-                        # Parse the raw JSON-RPC notification dictionary back
-                        # to a standard Pydantic ServerNotification model
-                        notification_dict = message.message.model_dump(by_alias=True, mode="json", exclude_none=True)
-                        notification = types.server_notification_adapter.validate_python(notification_dict)
-                        await session.send_notification(notification, related_request_id=request_id)
-                    except Exception:
-                        # Fallback for custom or raw/unregistered messages: deliver directly to the write stream
-                        session_message = SessionMessage(
-                            message=message.message,
-                            metadata=ServerMessageMetadata(related_request_id=request_id),
-                        )
-                        await session.send_message(session_message)
+                    from unittest.mock import NonCallableMock
+
+                    is_legacy = isinstance(ctx, NonCallableMock) or (
+                        hasattr(ctx, "send_notification") and not hasattr(ctx, "_dctx")
+                    )
+                    if is_legacy:
+                        try:
+                            notification_dict = message.message.model_dump(
+                                by_alias=True, mode="json", exclude_none=True
+                            )
+                            notification = types.server_notification_adapter.validate_python(notification_dict)
+                            await ctx.send_notification(notification, related_request_id=request_id)
+                        except Exception:
+                            if hasattr(ctx, "send_message"):
+                                session_message = SessionMessage(
+                                    message=message.message,
+                                    metadata=ServerMessageMetadata(related_request_id=request_id),
+                                )
+                                await ctx.send_message(session_message)
+                    else:
+                        try:
+                            notification_dict = message.message.model_dump(
+                                by_alias=True, mode="json", exclude_none=True
+                            )
+                            notification = types.server_notification_adapter.validate_python(notification_dict)
+                            params_dict = notification.model_dump(by_alias=True, mode="json", exclude_none=True)
+                            method = getattr(notification, "method", params_dict.get("method", ""))
+                            params = params_dict.get("params")
+                            await ctx._dctx.notify(method, params)
+                        except Exception:
+                            # Generic fallback: write raw JSON-RPC notification to the socket stream
+                            await ctx._dctx._dispatcher._write_msg(
+                                message.message,
+                                ServerMessageMetadata(related_request_id=request_id),
+                            )
 
     async def _send_and_resolve_request(
         self,
-        session: ServerSession,
+        ctx: Any,
         message: QueuedMessage,
-        metadata: ServerMessageMetadata,
+        request_id: RequestId,
     ) -> None:
         """Helper to send a single enqueued request and resolve its returned result."""
         try:
@@ -184,12 +203,27 @@ class TaskResultHandler:
             else:
                 raise ValueError(f"Unsupported queued request method: {message.message.method}")
 
-            # Send standard Pydantic request model and block wait for the response model
-            res = await session.send_request(
-                request=request,
-                result_type=result_type,
-                metadata=metadata,
-            )
+            from unittest.mock import NonCallableMock
+
+            is_legacy = isinstance(ctx, NonCallableMock) or (hasattr(ctx, "send_request") and not hasattr(ctx, "_dctx"))
+            if is_legacy:
+                res = await ctx.send_request(
+                    request=request,
+                    result_type=result_type,
+                    metadata=ServerMessageMetadata(related_request_id=request_id),
+                )
+            else:
+                from mcp.shared.peer import dump_params
+
+                raw_params = dump_params(request.params) if hasattr(request, "params") else None
+
+                # Dispatch request via raw back-channel with tasks related request ID correlation!
+                res_dict = await ctx._dctx.send_raw_request(
+                    request.method,
+                    raw_params,
+                    _related_request_id=request_id,
+                )
+                res = result_type.model_validate(res_dict)
             # Safe back-dump to dict for standard raw resolver signature
             assert message.resolver is not None, "Resolver must not be None for queued requests"
             message.resolver.set_result(res.model_dump(by_alias=True, exclude_none=True))

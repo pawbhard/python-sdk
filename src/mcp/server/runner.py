@@ -19,7 +19,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial, reduce
-from typing import Any, Generic, cast
+from typing import TYPE_CHECKING, Any, Generic, cast
 
 import anyio.abc
 from opentelemetry.trace import SpanKind, StatusCode
@@ -28,7 +28,9 @@ from typing_extensions import TypeVar
 
 from mcp.server.connection import Connection
 from mcp.server.context import CallNext, Context, ServerMiddleware
-from mcp.server.lowlevel.server import Server
+
+if TYPE_CHECKING:
+    from mcp.server.lowlevel.server import Server
 from mcp.shared._otel import extract_trace_context, otel_span
 from mcp.shared.dispatcher import DispatchContext, Dispatcher, DispatchMiddleware, OnRequest
 from mcp.shared.exceptions import MCPError
@@ -70,12 +72,23 @@ def otel_middleware(next_on_request: OnRequest) -> OnRequest:
                 pass
             case _:
                 target = None
-        parent: Any | None
-        match params:
-            case {"_meta": {**meta}}:
-                parent = extract_trace_context(meta)
-            case _:
-                parent = None
+        parent: Any | None = None
+        meta = None
+        if isinstance(params, BaseModel):
+            meta_val = getattr(params, "meta", None)
+            if meta_val is not None:
+                if isinstance(meta_val, dict):
+                    meta = cast(dict[str, Any], meta_val)
+                else:
+                    try:
+                        meta = meta_val.model_dump(by_alias=True, mode="json", exclude_none=True)
+                    except Exception:
+                        pass
+        elif isinstance(params, dict):
+            meta = params.get("_meta") or params.get("meta")
+
+        if meta:
+            parent = extract_trace_context(meta)
         span_name = f"MCP handle {method}{f' {target}' if target else ''}"
         with otel_span(
             span_name,
@@ -205,7 +218,14 @@ class ServerRunner(Generic[LifespanT]):
 
     def _make_context(self, dctx: DispatchContext[TransportContext], typed_params: BaseModel) -> Context[LifespanT]:
         meta = getattr(typed_params, "meta", None)
-        return Context(dctx, lifespan=self.lifespan_state, connection=self.connection, meta=meta)
+        return Context(
+            dctx,
+            server=self.server,
+            lifespan=self.lifespan_state,
+            connection=self.connection,
+            meta=meta,
+            params=typed_params,
+        )
 
     def _handle_initialize(self, params: Mapping[str, Any] | None) -> dict[str, Any]:
         init = InitializeRequestParams.model_validate(params or {})
@@ -223,6 +243,11 @@ class ServerRunner(Generic[LifespanT]):
         result = InitializeResult(
             protocol_version=self.connection.protocol_version,
             capabilities=self.server.capabilities(),
-            server_info=Implementation(name=self.server.name, version=self.server.version or "0.0.0"),
+            server_info=Implementation(
+                name=self.server.name,
+                version=self.server.version or "0.0.0",
+                title=getattr(self.server, "title", None),
+                description=getattr(self.server, "description", None),
+            ),
         )
         return _dump_result(result)

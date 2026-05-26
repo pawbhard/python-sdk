@@ -6,6 +6,7 @@ features within a request context, such as task-augmented request handling.
 WARNING: These APIs are experimental and may change without notice.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +28,8 @@ from mcp.types import (
     TaskMetadata,
     Tool,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -205,6 +208,7 @@ class Experimental:
                 if not is_terminal(task_ctx.task.status):
                     await task_ctx.complete(result)
             except Exception as e:
+                logger.exception("Task execute crashed in background")
                 if not is_terminal(task_ctx.task.status):
                     await task_ctx.fail(str(e))
 

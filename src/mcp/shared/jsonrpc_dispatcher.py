@@ -132,10 +132,13 @@ class _JSONRPCDispatchContext(Generic[TransportT]):
         method: str,
         params: Mapping[str, Any] | None,
         opts: CallOptions | None = None,
+        *,
+        _related_request_id: RequestId | None = None,
     ) -> dict[str, Any]:
         if not self.can_send_request:
             raise NoBackChannelError(method)
-        return await self._dispatcher.send_raw_request(method, params, opts, _related_request_id=self._request_id)
+        related_id = _related_request_id if _related_request_id is not None else self._request_id
+        return await self._dispatcher.send_raw_request(method, params, opts, _related_request_id=related_id)
 
     async def progress(self, progress: float, total: float | None = None, message: str | None = None) -> None:
         if self._progress_token is None:
@@ -338,9 +341,8 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
                         # snapshot per message). Plain memory streams don't.
                         sender_ctx: contextvars.Context | None = getattr(self._read_stream, "last_context", None)
                         self._dispatch(item, on_request, on_notify, sender_ctx)
-                # Read stream EOF: wake any blocked `send_raw_request` waiters now,
-                # *before* the task group joins, so handlers parked in
-                # `dctx.send_raw_request()` can unwind and the join doesn't deadlock.
+                # Read stream EOF: cancel all active handlers and wake waiters now!
+                tg.cancel_scope.cancel()
                 self._running = False
                 self._fan_out_closed()
         finally:
@@ -413,7 +415,9 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
     ) -> None:
         if msg.method == "notifications/cancelled":
             match msg.params:
-                case {"requestId": str() | int() as rid} if (in_flight := self._in_flight.get(rid)) is not None:
+                case {"requestId": str() | int() as rid} if (
+                    in_flight := self._in_flight.get(_coerce_id(rid))
+                ) is not None:
                     in_flight.cancelled_by_peer = True
                     in_flight.dctx.cancel_requested.set()
                     if self._peer_cancel_mode == "interrupt":
@@ -530,6 +534,16 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
             if self._raise_handler_exceptions:
                 raise
         finally:
+            in_flight = self._in_flight.get(req.id)
+            if in_flight is not None and in_flight.cancelled_by_peer:
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await self._write_error(
+                            req.id,
+                            ErrorData(code=REQUEST_CANCELLED, message="Request cancelled by peer"),
+                        )
+                    except Exception:
+                        pass
             self._in_flight.pop(req.id, None)
 
     def _allocate_id(self) -> int:

@@ -323,21 +323,12 @@ async def test_default_task_handlers_via_enable_tasks() -> None:
 
     async def run_server() -> None:
         async with task_support.run():
-            async with ServerSession(
+            await server.run(
                 client_to_server_receive,
                 server_to_client_send,
-                InitializationOptions(
-                    server_name="test-server",
-                    server_version="1.0.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                ),
-            ) as server_session:
-                task_support.configure_session(server_session)
-                async for message in server_session.incoming_messages:
-                    await server._handle_message(message, server_session, {}, False)
+                initialization_options=server.create_initialization_options(),
+                stateless=True,
+            )
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_server)

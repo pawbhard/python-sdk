@@ -35,7 +35,7 @@ async def test_context_exposes_lifespan_and_connection_and_forwards_base_context
     conn = Connection.__new__(Connection)  # placeholder until running_pair gives us the dispatcher
 
     async def server_on_request(dctx: DCtx, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
-        ctx: Context[_Lifespan] = Context(dctx, lifespan=_Lifespan("app"), connection=conn)
+        ctx: Context[_Lifespan] = Context(dctx, server=None, lifespan=_Lifespan("app"), connection=conn)
         captured.append(ctx)
         return {}
 
@@ -63,7 +63,7 @@ async def test_context_sample_round_trips_via_peer_mixin_on_base_context_outboun
 
     async def server_on_request(dctx: DCtx, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
         ctx: Context[_Lifespan] = Context(
-            dctx, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
+            dctx, server=None, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
         )
         results.append(
             await ctx.sample(
@@ -93,7 +93,7 @@ async def test_context_send_request_with_spec_type_infers_result_via_typed_mixin
 
     async def server_on_request(dctx: DCtx, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
         ctx: Context[_Lifespan] = Context(
-            dctx, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
+            dctx, server=None, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
         )
         results.append(await ctx.send_request(ListRootsRequest()))
         return {}
@@ -114,7 +114,7 @@ async def test_context_log_sends_request_scoped_message_notification():
 
     async def server_on_request(dctx: DCtx, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
         ctx: Context[_Lifespan] = Context(
-            dctx, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
+            dctx, server=None, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
         )
         await ctx.log("debug", "hello")
         return {}
@@ -138,7 +138,7 @@ async def test_context_log_includes_logger_and_meta_when_supplied():
 
     async def server_on_request(dctx: DCtx, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
         ctx: Context[_Lifespan] = Context(
-            dctx, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
+            dctx, server=None, lifespan=_Lifespan("app"), connection=Connection(dctx, has_standalone_channel=True)
         )
         await ctx.log("info", "x", logger="my.log", meta={"traceId": "t"})
         return {}
