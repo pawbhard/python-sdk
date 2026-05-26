@@ -121,6 +121,10 @@ class _JSONRPCDispatchContext(Generic[TransportT]):
     cancel_requested: anyio.Event = field(default_factory=anyio.Event)
 
     @property
+    def request_id(self) -> RequestId | None:
+        return self._request_id
+
+    @property
     def can_send_request(self) -> bool:
         return self.transport.can_send_request and not self._closed
 
@@ -198,6 +202,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
         transport_builder: Callable[[RequestId | None, MessageMetadata], TransportT],
         peer_cancel_mode: PeerCancelMode = "interrupt",
         raise_handler_exceptions: bool = False,
+        on_unhandled_message: Callable[[JSONRPCError | JSONRPCResponse], None] | None = None,
     ) -> None: ...
     def __init__(
         self,
@@ -207,6 +212,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
         transport_builder: Callable[[RequestId | None, MessageMetadata], TransportT] | None = None,
         peer_cancel_mode: PeerCancelMode = "interrupt",
         raise_handler_exceptions: bool = False,
+        on_unhandled_message: Callable[[JSONRPCError | JSONRPCResponse], None] | None = None,
     ) -> None:
         self._read_stream = read_stream
         self._write_stream = write_stream
@@ -219,6 +225,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
         )
         self._peer_cancel_mode: PeerCancelMode = peer_cancel_mode
         self._raise_handler_exceptions = raise_handler_exceptions
+        self._on_unhandled_message = on_unhandled_message
 
         self._next_id = 0
         self._pending: dict[RequestId, _Pending] = {}
@@ -285,7 +292,9 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
             # stop work and free resources. v1's BaseSession.send_request does
             # NOT do this; it's new behaviour.
             await self._cancel_outbound(request_id, f"timed out after {opts.get('timeout')}s")
-            raise MCPError(code=REQUEST_TIMEOUT, message=f"Request {method!r} timed out") from None
+            raise MCPError(
+                code=REQUEST_TIMEOUT, message=f"Request {method!r} Timed out while waiting for response"
+            ) from None
         except anyio.get_cancelled_exc_class():
             # Our caller's scope was cancelled. We're already inside a cancelled
             # scope, so any bare `await` here re-raises immediately — shield to
@@ -375,12 +384,21 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
             case JSONRPCNotification():
                 self._dispatch_notification(msg, metadata, on_notify, sender_ctx)
             case JSONRPCResponse():
-                self._resolve_pending(msg.id, msg.result)
+                if msg.id is None or _coerce_id(msg.id) not in self._pending:
+                    if self._on_unhandled_message is not None:
+                        self._on_unhandled_message(msg)
+                    else:
+                        self._resolve_pending(msg.id, msg.result)
+                else:
+                    self._resolve_pending(msg.id, msg.result)
             case JSONRPCError():  # pragma: no branch
-                # `id` may be None per JSON-RPC (parse error before id known).
-                # The match is exhaustive over JSONRPCMessage; the no-match arc
-                # on this final case is unreachable.
-                self._resolve_pending(msg.id, msg.error)
+                if msg.id is None or _coerce_id(msg.id) not in self._pending:
+                    if self._on_unhandled_message is not None:
+                        self._on_unhandled_message(msg)
+                    else:
+                        self._resolve_pending(msg.id, msg.error)
+                else:
+                    self._resolve_pending(msg.id, msg.error)
 
     def _dispatch_request(
         self,
@@ -403,7 +421,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
             _progress_token=progress_token,
         )
         scope = anyio.CancelScope()
-        self._in_flight[req.id] = _InFlight(scope=scope, dctx=dctx)
+        self._in_flight[_coerce_id(req.id)] = _InFlight(scope=scope, dctx=dctx)
         self._spawn(self._handle_request, req, dctx, scope, on_request, sender_ctx=sender_ctx)
 
     def _dispatch_notification(
@@ -432,6 +450,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
                 ) is not None and pending.on_progress is not None:
                     total = msg.params.get("total")
                     message = msg.params.get("message")
+
                     self._spawn(
                         pending.on_progress,
                         float(progress),
@@ -481,7 +500,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
         Synchronous (uses ``send_nowait``) because it's called from ``finally``
         which may be inside a cancelled scope. Idempotent.
         """
-        closed = ErrorData(code=CONNECTION_CLOSED, message="connection closed")
+        closed = ErrorData(code=CONNECTION_CLOSED, message="Connection closed")
         for pending in self._pending.values():
             try:
                 pending.send.send_nowait(closed)
@@ -523,7 +542,9 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
             # `await` here re-raises immediately, so shield the courtesy write.
             with anyio.CancelScope(shield=True):
                 await self._write_error(req.id, ErrorData(code=REQUEST_CANCELLED, message="Request cancelled"))
-            raise
+            if not self._running:
+                raise
+            logger.debug("Request handler task %r cancelled independently while dispatcher is running", req.method)
         except MCPError as e:
             await self._write_error(req.id, e.error)
         except ValidationError as e:
@@ -534,7 +555,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
             if self._raise_handler_exceptions:
                 raise
         finally:
-            in_flight = self._in_flight.get(req.id)
+            in_flight = self._in_flight.get(_coerce_id(req.id))
             if in_flight is not None and in_flight.cancelled_by_peer:
                 with anyio.CancelScope(shield=True):
                     try:
@@ -544,7 +565,7 @@ class JSONRPCDispatcher(Dispatcher[TransportT]):
                         )
                     except Exception:
                         pass
-            self._in_flight.pop(req.id, None)
+            self._in_flight.pop(_coerce_id(req.id), None)
 
     def _allocate_id(self) -> int:
         self._next_id += 1

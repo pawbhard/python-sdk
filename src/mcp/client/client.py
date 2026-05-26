@@ -115,10 +115,13 @@ class Client:
         async with AsyncExitStack() as exit_stack:
             read_stream, write_stream = await exit_stack.enter_async_context(self._transport)
 
+            from mcp.shared.jsonrpc_dispatcher import JSONRPCDispatcher
+
+            dispatcher = JSONRPCDispatcher(read_stream, write_stream)
+
             self._session = await exit_stack.enter_async_context(
                 ClientSession(
-                    read_stream=read_stream,
-                    write_stream=write_stream,
+                    dispatcher=dispatcher,
                     read_timeout_seconds=self.read_timeout_seconds,
                     sampling_callback=self.sampling_callback,
                     list_roots_callback=self.list_roots_callback,

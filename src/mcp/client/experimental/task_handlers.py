@@ -265,24 +265,28 @@ class ExperimentalTaskHandlers:
 
         match responder.request:
             case types.GetTaskRequest(params=params):
-                response = await self.get_task(ctx, params)
-                client_response = client_response_type.validate_python(response)
-                await responder.respond(client_response)
+                with responder:
+                    response = await self.get_task(ctx, params)
+                    client_response = client_response_type.validate_python(response)
+                    await responder.respond(client_response)
 
             case types.GetTaskPayloadRequest(params=params):
-                response = await self.get_task_result(ctx, params)
-                client_response = client_response_type.validate_python(response)
-                await responder.respond(client_response)
+                with responder:
+                    response = await self.get_task_result(ctx, params)
+                    client_response = client_response_type.validate_python(response)
+                    await responder.respond(client_response)
 
             case types.ListTasksRequest(params=params):
-                response = await self.list_tasks(ctx, params)
-                client_response = client_response_type.validate_python(response)
-                await responder.respond(client_response)
+                with responder:
+                    response = await self.list_tasks(ctx, params)
+                    client_response = client_response_type.validate_python(response)
+                    await responder.respond(client_response)
 
             case types.CancelTaskRequest(params=params):
-                response = await self.cancel_task(ctx, params)
-                client_response = client_response_type.validate_python(response)
-                await responder.respond(client_response)
+                with responder:
+                    response = await self.cancel_task(ctx, params)
+                    client_response = client_response_type.validate_python(response)
+                    await responder.respond(client_response)
 
             case _:  # pragma: no cover
                 raise ValueError(f"Unhandled request type: {type(responder.request)}")
